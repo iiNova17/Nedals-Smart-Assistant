@@ -42,7 +42,7 @@ target=full phone; title=name; member profile additionally role,text=duties.
 settings_update: operation=mode target=public|whitelist|owner; trigger target=mention|all;
 pause/resume (no target); limit target='user 40' or 'team 200'; calendar target='shared
 CALENDAR_ID'.
-group_manage: operation=remember,target=current group name; target/forget use target=known
+group_manage: operation=remember,target=group name; target/forget use target=known
 group ID.
 reminder_create: recurrence='once ISO_DATETIME' or 'daily N HH:MM' or 'weekly Mon,Wed
 HH:MM',text.

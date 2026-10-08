@@ -301,7 +301,12 @@ class ProjectTools(DriveTools):
                     with self.commands.ws.db.connect() as c:
                         return {
                             "groups": [
-                                dict(r)
+                                {
+                                    "chat": r["chat"],
+                                    "name": (
+                                        "General Group" if r["name"] == r["chat"] else r["name"]
+                                    ),
+                                }
                                 for r in c.execute(
                                     "SELECT chat,name FROM registered_groups WHERE enabled=1"
                                 )

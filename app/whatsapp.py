@@ -30,6 +30,17 @@ class IncomingMessage(BaseModel):
     media_error: Literal["", "too_large", "download_failed", "spool_full"] = ""
 
 
+class GroupInfo(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    chat: str = Field(min_length=1, max_length=150)
+    name: str = Field(default="", max_length=150)
+
+
+class GroupSyncRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    groups: list[GroupInfo]
+
+
 def router(
     settings: Settings, db: Database, assistant: Assistant, ingestion: Ingestion | None = None
 ) -> APIRouter:
@@ -47,6 +58,20 @@ def router(
             or not secrets.compare_digest(expected, credentials.credentials)
         ):
             raise HTTPException(401, "Bridge authentication required")
+
+    @routes.post("/groups/sync", dependencies=[Depends(bridge_auth)])
+    def sync_groups(body: GroupSyncRequest):
+        with db.connect() as connection:
+            for g in body.groups:
+                name = g.name.strip()
+                if not name or name.lower() in {"current group name", "this group"}:
+                    continue
+                connection.execute(
+                    "INSERT INTO registered_groups(chat, name, enabled) VALUES (?, ?, 1) "
+                    "ON CONFLICT(chat) DO UPDATE SET name = excluded.name, enabled = 1",
+                    (g.chat, name[:100]),
+                )
+        return {"status": "ok", "synced": len(body.groups)}
 
     @routes.get("/members", dependencies=[Depends(bridge_auth)])
     def members():
@@ -106,6 +131,12 @@ def router(
                 and not actor.admin
             ):
                 raise HTTPException(403, "Register this group with an admin command first")
+            if actor.admin and body.chat_id not in workspace.policy()["groups"]:
+                with db.connect() as connection:
+                    connection.execute(
+                        "INSERT OR IGNORE INTO registered_groups VALUES (?,?,1)",
+                        (body.chat_id, "Registered Group"),
+                    )
             # The owner can register a new group via an authenticated chat command.
             # Other groups require public mode or explicit group registration.
             scope = "group:" + body.chat_id

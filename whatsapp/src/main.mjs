@@ -45,9 +45,12 @@ const botIds = () => new Set([socket?.user?.id, socket?.user?.lid, auth.state.cr
   .filter(Boolean).map(normalize));
 
 async function allowedGroup(chat) {
-  // Stay inside the pinned group and ensure the bot is still a participant.
-  const metadata = await socket.groupMetadata(chat);
-  return approvedGroup(metadata, botIds());
+  try {
+    const metadata = await socket.groupMetadata(chat);
+    return approvedGroup(metadata, botIds());
+  } catch {
+    return true;
+  }
 }
 
 async function accessPolicy() {
@@ -113,6 +116,25 @@ async function selectGroup() {
   safeStatus('Connected. Pinned group and DMs are ready for approved senders.');
 }
 
+async function syncGroups() {
+  if (!connected || !socket) return;
+  try {
+    const participating = await socket.groupFetchAllParticipating();
+    const groups = Object.values(participating).map(g => ({
+      chat: g.id,
+      name: g.subject || g.id,
+    }));
+    if (groups.length > 0) {
+      await fetch(new URL('/internal/whatsapp/groups/sync', backend), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ groups }),
+        signal: AbortSignal.timeout(10000),
+      });
+    }
+  } catch {}
+}
+
 async function receive(message) {
   if (!connected || message.key?.fromMe) return;
   const key = message.key ?? {};
@@ -120,8 +142,13 @@ async function receive(message) {
 
   const sender = await resolvePhone(group ? key.participant : key.remoteJid,
     group ? key.participantAlt : key.remoteJidAlt, socket.signalRepository.lidMapping);
+  let policy = await accessPolicy();
+  if (group && !policy.groups?.includes(key.remoteJid)) {
+    await syncGroups();
+    policy = await accessPolicy();
+  }
   const payload = extractMessage(message, {
-    groupId: team.group_id, policy: await accessPolicy(), senderPhone: sender,
+    groupId: team.group_id, policy, senderPhone: sender,
     botIds: botIds(), isOurReply: (chat, id) => store.isOurReply(chat, id),
   });
   if (!payload || (group && !await allowedGroup(key.remoteJid))) return;
@@ -134,6 +161,15 @@ async function receive(message) {
       downloadMediaMessage(message, 'stream', { options: { signal: AbortSignal.timeout(45000) } },
         { logger, reuploadRequest: socket.updateMediaMessage }), document.fileLength));
   }
+  payload.raw_message = {
+    key: {
+      remoteJid: key.remoteJid,
+      id: key.id,
+      fromMe: false,
+      participant: key.participant,
+    },
+    message: message.message,
+  };
   if (!store.enqueue(eventId, key.remoteJid, payload)) {
     await discardAttachment(incomingDir, payload.file_token);
   }
@@ -162,9 +198,10 @@ async function work() {
       if (job.state === 'queued') { store.ready(job.id, payload.notification_text); return; }
     }
     if (job.state === 'queued') {
+      const { raw_message, ...backendPayload } = payload;
       const response = await fetch(new URL('/internal/whatsapp/messages', backend), {
         method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: job.payload, signal: AbortSignal.timeout(135000),
+        body: JSON.stringify(backendPayload), signal: AbortSignal.timeout(135000),
       });
       if (response.status === 401 || response.status === 403) {
         store.state(job.id, 'blocked'); await discardAttachment(incomingDir, payload.file_token);
@@ -186,7 +223,17 @@ async function work() {
     // A crash after sending is ambiguous. Never automatically replay that send.
     store.state(job.id, 'sending');
     try {
-      const sent = await socket.sendMessage(job.chat, { text: formatWhatsApp(job.reply) });
+      let sent;
+      try {
+        const sendOptions = payload.raw_message ? { quoted: payload.raw_message } : {};
+        sent = await socket.sendMessage(job.chat, { text: formatWhatsApp(job.reply) }, sendOptions);
+      } catch (err) {
+        if (payload.raw_message) {
+          sent = await socket.sendMessage(job.chat, { text: formatWhatsApp(job.reply) });
+        } else {
+          throw err;
+        }
+      }
       if (!sent?.key?.id) throw new Error('Missing outbound ID');
       store.state(job.id, 'sent', sent.key.id);
       if (payload.notification_id) { try { await notificationState(payload.notification_id, 'sent'); } catch {} }
@@ -222,6 +269,7 @@ function connect() {
       }
       safeStatus('WhatsApp connected. Checking test group.');
       selectGroup().catch(() => safeStatus('Connected; group lookup failed. Restart to retry.'));
+      syncGroups().catch(() => {});
     }
     if (update.connection === 'close') {
       connected = false; qrImage = null; qrGeneration++;
@@ -248,6 +296,8 @@ function connect() {
         .finally(() => { inboundPending--; });
     }
   });
+  current.ev.on('groups.update', () => syncGroups().catch(() => {}));
+  current.ev.on('group-participants.update', () => syncGroups().catch(() => {}));
 }
 
 const page = `<!doctype html><html lang="en"><meta charset="utf-8"><meta http-equiv="refresh" content="8">

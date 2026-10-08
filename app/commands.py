@@ -420,13 +420,27 @@ class Commands:
             if args[1] == "remember":
                 if actor.channel != "group":
                     raise ValueError("Run this command inside the group to remember")
+                raw_name = " ".join(args[2:]).strip()[:100]
+                placeholder = {"current group name", "this group", "current group", "name of group"}
+                if not raw_name or raw_name.lower() in placeholder:
+                    with self.ws.db.connect() as c:
+                        existing = c.execute(
+                            "SELECT name FROM registered_groups WHERE chat=?", (actor.chat,)
+                        ).fetchone()
+                        name = (
+                            existing[0]
+                            if (existing and existing[0].lower() not in placeholder)
+                            else "Team Group"
+                        )
+                else:
+                    name = raw_name
                 with self.ws.db.connect() as c:
                     c.execute(
                         "INSERT OR REPLACE INTO registered_groups VALUES (?,?,1)",
-                        (actor.chat, " ".join(args[2:])[:100]),
+                        (actor.chat, name),
                     )
                 self.ws.set("reminder_target", actor.chat)
-                return "This group is registered and selected for reminders."
+                return f"This group ('{name}') is registered and selected for reminders."
             chat = args[2]
             with self.ws.db.connect() as c:
                 if not c.execute(
