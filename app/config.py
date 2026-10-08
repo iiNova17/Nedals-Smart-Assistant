@@ -11,6 +11,7 @@ class Settings(BaseSettings):
 
     database_path: Path = Path("data/plume.sqlite3")
     gemini_api_key: SecretStr = SecretStr("")
+    gemini_api_keys: str = ""  # Comma-separated list of API keys for rotation
     gemini_model: str = Field(default="gemini-3.5-flash", min_length=1)
     gemini_fallback_model: str = "gemini-3.5-flash-lite"
     max_output_tokens: int = Field(default=2048, ge=128, le=8192)

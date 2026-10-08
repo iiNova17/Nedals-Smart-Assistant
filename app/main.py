@@ -63,14 +63,12 @@ def create_app(settings: Settings | None = None, provider: ChatProvider | None =
         if team and team.drive_folder_id
         else None
     )
+    from app.providers.gemini import _resolve_keys
+
+    api_keys = _resolve_keys(settings)
     knowledge = (
-        Knowledge(settings, db, drive)
-        if (
-            provider is None
-            and drive
-            and settings.document_search_enabled
-            and settings.gemini_api_key.get_secret_value()
-        )
+        Knowledge(settings, db, drive, api_keys=api_keys)
+        if (provider is None and drive and settings.document_search_enabled and api_keys)
         else None
     )
     workspace = Workspace(db)

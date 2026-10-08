@@ -86,6 +86,46 @@ def test_quota_fallback_preserves_tool_context_and_backoff(monkeypatch):
     ]
 
 
+def test_multi_key_rotation_switches_client_on_429(monkeypatch):
+    clients = []
+
+    def fake_client_builder(**kwargs):
+        c = MagicMock()
+        c.api_key = kwargs.get("api_key")
+        c.aio.models.generate_content = AsyncMock()
+        c.aio.aclose = AsyncMock()
+        clients.append(c)
+        return c
+
+    monkeypatch.setattr("app.providers.gemini.genai.Client", fake_client_builder)
+    settings = Settings(
+        _env_file=None,
+        gemini_api_keys="key-alpha,key-beta",
+        gemini_api_key="key-alpha",
+    )
+    provider = GeminiProvider(settings)
+    assert len(provider._clients) == 2
+
+    # Client 0 hits 429; Client 1 returns a valid response
+    success_resp = types.GenerateContentResponse(
+        candidates=[
+            types.Candidate(
+                finish_reason="STOP",
+                content=types.Content(parts=[types.Part(text="Answer from key 2")]),
+            )
+        ]
+    )
+    clients[0].aio.models.generate_content.side_effect = errors.ClientError(
+        429, {"error": {"message": "Resource exhausted"}}
+    )
+    clients[1].aio.models.generate_content.return_value = success_resp
+
+    res = asyncio.run(provider.complete([Message("user", "Hello")]))
+    assert res.text == "Answer from key 2"
+    clients[0].aio.models.generate_content.assert_awaited_once()
+    clients[1].aio.models.generate_content.assert_awaited_once()
+
+
 @pytest.mark.parametrize("reason", ["SAFETY", "MAX_TOKENS"])
 def test_incomplete_answers_not_saved(monkeypatch, reason):
     result = types.GenerateContentResponse(

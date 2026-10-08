@@ -5,7 +5,7 @@ import logging
 import re
 import tempfile
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from google import genai
@@ -30,19 +30,71 @@ def revision(file: dict) -> str:
 
 
 class Knowledge:
-    def __init__(self, settings: Settings, db: Database, drive: DriveClient, client=None):
+    def __init__(
+        self,
+        settings: Settings,
+        db: Database,
+        drive: DriveClient,
+        client=None,
+        api_keys: list[str] | None = None,
+    ):
         self.settings, self.db, self.drive = settings, db, drive
         self.lock = threading.Lock()
         self.last_error = ""
-        self.client = client or genai.Client(
-            api_key=settings.gemini_api_key.get_secret_value(),
-            http_options=types.HttpOptions(
-                timeout=90000, retry_options=types.HttpRetryOptions(attempts=1)
-            ),
+        timeout_opts = types.HttpOptions(
+            timeout=90000, retry_options=types.HttpRetryOptions(attempts=1)
+        )
+        if client:
+            self.client = client
+            self._clients = [client]
+        elif api_keys:
+            self._clients = [
+                genai.Client(api_key=key, http_options=timeout_opts) for key in api_keys
+            ]
+            self.client = self._clients[0]
+        else:
+            self.client = genai.Client(
+                api_key=settings.gemini_api_key.get_secret_value(),
+                http_options=timeout_opts,
+            )
+            self._clients = [self.client]
+        self._current_index = 0
+        self._exhausted_until: list[datetime] = [
+            datetime.min.replace(tzinfo=UTC) for _ in self._clients
+        ]
+
+    def _pick_client(self) -> genai.Client:
+        """Pick the next available client, rotating past exhausted ones."""
+        now = datetime.now(UTC)
+        n = len(self._clients)
+        for offset in range(n):
+            idx = (self._current_index + offset) % n
+            if self._exhausted_until[idx] <= now:
+                self._current_index = idx
+                self.client = self._clients[idx]
+                return self.client
+        # All exhausted — use the one recovering soonest.
+        idx = min(range(n), key=lambda i: self._exhausted_until[i])
+        self._current_index = idx
+        self.client = self._clients[idx]
+        return self.client
+
+    def _mark_exhausted(self, seconds: float = 60):
+        """Mark the current key as exhausted and rotate."""
+        idx = self._current_index
+        self._exhausted_until[idx] = datetime.now(UTC) + timedelta(seconds=min(seconds, 86400))
+        self._current_index = (idx + 1) % len(self._clients)
+        self.client = self._clients[self._current_index]
+        logger.info(
+            "knowledge key #%d exhausted, rotating to #%d", idx + 1, self._current_index + 1
         )
 
     def close(self):
-        self.client.close()
+        for c in self._clients:
+            try:
+                c.close()
+            except Exception:
+                pass
 
     def records(self) -> list[dict]:
         with self.db.connect() as db:
@@ -121,6 +173,7 @@ class Knowledge:
         """One bounded pass; remote operations are polled in subsequent passes."""
         if not self.lock.acquire(blocking=False):
             return self.status()
+        self._pick_client()
         try:
             catalog = {file["id"]: file for file in self.drive.pdf_catalog()}
             if (
@@ -318,6 +371,7 @@ class Knowledge:
 
     def answer(self, question: str, file_ids: list[str] | None = None) -> dict:
         """One grounded model request. Never return an uncited document answer."""
+        self._pick_client()
         store, rows = self.active_snapshot(file_ids)
         metadata_filter = " OR ".join(f'source_key="{r["source_key"]}"' for r in rows)
         response = self.client.models.generate_content(
