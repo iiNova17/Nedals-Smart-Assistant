@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nedal's Smart Assistant</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/assets/style.css"><script src="/assets/app.js" defer></script></head>
+<body><div class="shell"><header><div><h1 id="brand">Nedal's Smart Assistant</h1><p>Your project, in one conversation.</p></div><button id="theme" class="quiet" aria-label="Switch color theme">Dark theme</button></header>
+<main><div class="heading"><div><h2>Project chat</h2><p>Ask about documents, decisions, schedules or the web.</p></div><button id="new">New conversation</button></div>
+<p id="connection" role="status" aria-live="polite">Getting ready…</p>
+<section class="chat" aria-label="Chat conversation"><div id="messages" role="log" aria-live="polite" aria-relevant="additions"><div class="empty" id="empty"><svg viewBox="0 0 64 64" aria-hidden="true"><path d="M43 35c-4 5-13 7-20 5L12 46l3-11C4 22 14 10 28 10s23 9 21 18M43 29c14 4 17 14 10 21l2 8-10-5c-8 1-14-2-17-7"/></svg><h3>How can I help your team?</h3><p>Ask naturally. I can find answers, organize files and help your team plan.</p></div></div>
+<div class="composer"><form id="chat-form"><label class="sr-only" for="message">Message your assistant</label><textarea id="message" placeholder="Message your assistant…" rows="2" maxlength="8000" required></textarea><button id="send" class="primary" type="submit">Send</button></form>
+<form id="upload-form"><label class="file-button" for="file">Choose file</label><input id="file" type="file" class="sr-only"><span id="filename">No file selected</span><label class="sr-only" for="folder">Drive folder (optional)</label><input id="folder" placeholder="Drive folder (optional)" maxlength="200"><button id="upload" type="submit">Upload to Drive</button></form></div></section>
+<footer><div><button id="documents">Document status</button><button id="help">Help</button></div><span>Runs while your computer is online.</span></footer><p id="notice" role="status" aria-live="polite"></p></main></div></body></html>

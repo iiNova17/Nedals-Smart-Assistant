@@ -179,3 +179,17 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# PLUME private runtime state
+data/
+secrets/
+.env.*
+!.env.example
+*.sqlite3*
+*.db
+auth_info_baileys/
+.wwebjs_auth/
+node_modules/
+
+# Deployment-specific identity, team and project context
+context/local/

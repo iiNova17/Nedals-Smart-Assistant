@@ -1,0 +1,1 @@
+"""Nedal’s Smart Assistant."""
