@@ -51,11 +51,10 @@ class Assistant:
                 return completion
         if not self.provider.ready:
             raise ProviderUnavailable()
-        num_keys = max(1, len(getattr(self.provider, "_keys", [])))
         self.db.reserve_request(
             user.id,
-            self.workspace.get("daily_team_requests", self.settings.daily_team_requests) * num_keys,
-            self.workspace.get("daily_user_requests", self.settings.daily_user_requests) * num_keys,
+            self.workspace.get("daily_team_requests", self.settings.daily_team_requests),
+            self.workspace.get("daily_user_requests", self.settings.daily_user_requests),
         )
         self.db.cleanup(self.settings.context_days)
         history = self.db.history(

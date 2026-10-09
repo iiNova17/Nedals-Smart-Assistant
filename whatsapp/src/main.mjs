@@ -8,7 +8,7 @@ import makeWASocket, { DisconnectReason, downloadMediaMessage, normalizeMessageC
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { Store } from './store.mjs';
-import { formatWhatsApp } from './format.mjs';
+import { quoteFor, sendReply } from './reply.mjs';
 import { approvedGroup, canReply, extractMessage, normalize, phoneOf, resolvePhone } from './policy.mjs';
 import { saveAttachment, discardAttachment } from './media.mjs';
 
@@ -116,8 +116,12 @@ async function selectGroup() {
   safeStatus('Connected. Pinned group and DMs are ready for approved senders.');
 }
 
+let syncingGroups = false;
+let lastGroupSync = 0;
 async function syncGroups() {
-  if (!connected || !socket) return;
+  if (!connected || !socket || syncingGroups || Date.now() - lastGroupSync < 60000) return;
+  syncingGroups = true;
+  lastGroupSync = Date.now();
   try {
     const participating = await socket.groupFetchAllParticipating();
     const groups = Object.values(participating).map(g => ({
@@ -133,6 +137,7 @@ async function syncGroups() {
       });
     }
   } catch {}
+  finally { syncingGroups = false; }
 }
 
 async function receive(message) {
@@ -161,15 +166,7 @@ async function receive(message) {
       downloadMediaMessage(message, 'stream', { options: { signal: AbortSignal.timeout(45000) } },
         { logger, reuploadRequest: socket.updateMediaMessage }), document.fileLength));
   }
-  payload.raw_message = {
-    key: {
-      remoteJid: key.remoteJid,
-      id: key.id,
-      fromMe: false,
-      participant: key.participant,
-    },
-    message: message.message,
-  };
+  payload.raw_message = quoteFor(message);
   if (!store.enqueue(eventId, key.remoteJid, payload)) {
     await discardAttachment(incomingDir, payload.file_token);
   }
@@ -223,17 +220,7 @@ async function work() {
     // A crash after sending is ambiguous. Never automatically replay that send.
     store.state(job.id, 'sending');
     try {
-      let sent;
-      try {
-        const sendOptions = payload.raw_message ? { quoted: payload.raw_message } : {};
-        sent = await socket.sendMessage(job.chat, { text: formatWhatsApp(job.reply) }, sendOptions);
-      } catch (err) {
-        if (payload.raw_message) {
-          sent = await socket.sendMessage(job.chat, { text: formatWhatsApp(job.reply) });
-        } else {
-          throw err;
-        }
-      }
+      const sent = await sendReply(socket, job.chat, job.reply, payload.raw_message);
       if (!sent?.key?.id) throw new Error('Missing outbound ID');
       store.state(job.id, 'sent', sent.key.id);
       if (payload.notification_id) { try { await notificationState(payload.notification_id, 'sent'); } catch {} }

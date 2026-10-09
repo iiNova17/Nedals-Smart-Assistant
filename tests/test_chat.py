@@ -209,3 +209,12 @@ def test_context_character_budget_preserves_complete_turns(setup):
     send(client, cid, "a" * 100)
     assert app.state.db.history(cid, 2, 10) == []
     assert len(app.state.db.history(cid, 2, 200)) == 2
+
+
+def test_multiple_provider_keys_do_not_raise_admin_configured_limits(setup):
+    client, app, provider, _, _ = setup
+    provider._keys = ["one", "two", "three"]
+    cid = conversation(client)
+    for _ in range(3):
+        assert send(client, cid).status_code == 200
+    assert send(client, cid).status_code == 429

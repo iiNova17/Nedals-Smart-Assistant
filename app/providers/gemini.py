@@ -45,8 +45,8 @@ def _resolve_keys(settings: Settings) -> list[str]:
     Duplicates are removed while preserving order.
     """
     keys: list[str] = []
-    if settings.gemini_api_keys:
-        for raw in settings.gemini_api_keys.split(","):
+    if settings.gemini_api_keys.get_secret_value():
+        for raw in settings.gemini_api_keys.get_secret_value().split(","):
             key = raw.strip()
             if key and key not in keys:
                 keys.append(key)
@@ -67,12 +67,11 @@ class GeminiProvider:
         timeout_ms = int(settings.provider_timeout_seconds * 1000)
         self._keys = _resolve_keys(settings)
         self._clients: list[genai.Client] = []
-        self._exhausted_until: list[datetime] = []
+        self._exhausted_until: dict[tuple[int, str], datetime] = {}
         for key in self._keys:
             client = _build_client(key, timeout_ms)
             if client:
                 self._clients.append(client)
-                self._exhausted_until.append(datetime.min.replace(tzinfo=UTC))
         self._current_index = 0
 
         # Expose .client for compatibility (ProjectTools.search_client uses it).
@@ -88,48 +87,23 @@ class GeminiProvider:
     def ready(self) -> bool:
         return len(self._clients) > 0
 
-    def _pick_client(self) -> tuple[genai.Client, int]:
-        """Return the next available client that isn't quota-exhausted.
-
-        Rotates through all keys. If every key is exhausted, uses the one
-        whose cooldown expires soonest (so the request waits minimally or
-        the API itself may have recovered).
-        """
-        now = datetime.now(UTC)
-        n = len(self._clients)
-        if n == 0:
-            raise ProviderUnavailable()
-
-        # Try from current index forward, wrapping around.
-        for offset in range(n):
-            idx = (self._current_index + offset) % n
-            if self._exhausted_until[idx] <= now:
+    def _pick_client(self, model: str, tried: set[int]) -> tuple[genai.Client, int]:
+        """Never revisit a tried key or ignore a model-specific cooldown."""
+        clock = datetime.now(UTC)
+        for offset in range(len(self._clients)):
+            idx = (self._current_index + offset) % len(self._clients)
+            until = self._exhausted_until.get((idx, model), datetime.min.replace(tzinfo=UTC))
+            if idx not in tried and until <= clock:
                 self._current_index = idx
                 return self._clients[idx], idx
+        raise ProviderUnavailable()
 
-        # All exhausted — pick the one that recovers soonest.
-        idx = min(range(n), key=lambda i: self._exhausted_until[i])
-        self._current_index = idx
-        logger.warning(
-            "api_key_pool all %d keys exhausted, using key #%d (cooldown until %s)",
-            n,
-            idx + 1,
-            self._exhausted_until[idx].isoformat(),
+    def _mark_exhausted(self, idx: int, model: str, seconds: float = 60):
+        self._exhausted_until[idx, model] = datetime.now(UTC) + timedelta(
+            seconds=max(1, min(seconds, 86400))
         )
-        return self._clients[idx], idx
-
-    def _mark_exhausted(self, idx: int, seconds: float = 60):
-        """Mark a key as quota-exhausted for `seconds`."""
-        until = datetime.now(UTC) + timedelta(seconds=min(seconds, 86400))
-        self._exhausted_until[idx] = until
-        # Advance to the next key for the next request.
         self._current_index = (idx + 1) % len(self._clients)
-        logger.info(
-            "api_key_pool key #%d exhausted, rotating to key #%d (cooldown %ds)",
-            idx + 1,
-            self._current_index + 1,
-            int(seconds),
-        )
+        logger.info("api_key_pool cooldown key_index=%d seconds=%d", idx + 1, seconds)
 
     def _extract_retry_seconds(self, error: errors.APIError) -> float:
         """Extract retry delay from a 429 error's details."""
@@ -148,8 +122,12 @@ class GeminiProvider:
         tried = set()
         last_error = None
 
+        model = kwargs.get("model", "")
         while len(tried) < len(self._clients):
-            client, idx = self._pick_client()
+            try:
+                client, idx = self._pick_client(model, tried)
+            except ProviderUnavailable:
+                break
             tried.add(idx)
 
             for attempt in range(3):
@@ -157,14 +135,11 @@ class GeminiProvider:
                     return await client.aio.models.generate_content(**kwargs)
                 except errors.APIError as error:
                     is_quota = (
-                        error.code == 429
-                        or getattr(error, "status", "") == "RESOURCE_EXHAUSTED"
-                        or "RESOURCE_EXHAUSTED" in str(error)
-                        or "quota" in str(error).lower()
+                        error.code == 429 or getattr(error, "status", "") == "RESOURCE_EXHAUSTED"
                     )
                     if is_quota:
                         seconds = self._extract_retry_seconds(error)
-                        self._mark_exhausted(idx, seconds)
+                        self._mark_exhausted(idx, model, seconds)
                         last_error = error
                         break  # Break retry loop, try next key.
                     if error.code not in {500, 502, 503, 504} or attempt == 2:
@@ -174,7 +149,7 @@ class GeminiProvider:
         # All keys tried and exhausted.
         if last_error:
             raise last_error
-        raise ProviderUnavailable()
+        raise errors.ClientError(429, {"error": {"message": "Configured credentials cooling down"}})
 
     async def complete(self, messages: list[Message]) -> Completion:
         if not self._clients:
@@ -228,10 +203,7 @@ class GeminiProvider:
                     logger.warning("provider_api_error status=%s", error.code)
                     fallback = self.settings.gemini_fallback_model
                     is_quota = (
-                        error.code == 429
-                        or getattr(error, "status", "") == "RESOURCE_EXHAUSTED"
-                        or "RESOURCE_EXHAUSTED" in str(error)
-                        or "quota" in str(error).lower()
+                        error.code == 429 or getattr(error, "status", "") == "RESOURCE_EXHAUSTED"
                     )
                     if not is_quota or not fallback or model == fallback:
                         raise
