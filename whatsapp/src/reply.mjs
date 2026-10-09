@@ -79,9 +79,12 @@ export function extractReplyContext(message) {
   };
 }
 
-export async function sendReply(socket, chat, text, rawMessage) {
+export async function sendReply(socket, chat, text, rawMessage, mentions = []) {
   const quote = quoteFor(rawMessage);
   const options = quote?.key.remoteJid === chat ? { quoted: quote } : {};
   // Once sending starts, any failure may mean delivery happened. Never retry unquoted.
-  return socket.sendMessage(chat, { text: formatWhatsApp(text) }, options);
+  const safeMentions = chat.endsWith('@g.us') && Array.isArray(mentions)
+    ? [...new Set(mentions.filter(jid => /^[1-9][0-9]{7,14}@s\.whatsapp\.net$/.test(jid)))].slice(0, 20) : [];
+  return socket.sendMessage(chat, { text: formatWhatsApp(text),
+    ...(safeMentions.length ? { mentions: safeMentions } : {}) }, options);
 }

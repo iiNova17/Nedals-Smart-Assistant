@@ -15,7 +15,6 @@ ACTIONS = [
     "member_update",
     "settings_update",
     "group_manage",
-    "reminder_create",
     "reminder_cancel",
     "work_package_update",
     "context_update",
@@ -44,9 +43,8 @@ pause/resume (no target); limit target='user 40' or 'team 200'; calendar target=
 CALENDAR_ID'.
 group_manage: operation=remember,target=group name; target/forget use target=known
 group ID.
-reminder_create: recurrence='once ISO_DATETIME' or 'daily N HH:MM' or 'weekly Mon,Wed
-HH:MM',text.
-Uses current group or saved reminder target. reminder_cancel: id.
+Use schedule_task_propose for reminders, including private DMs, with a separate confirmation.
+reminder_cancel: id (legacy reminders only; use scheduled_task_manage for new tasks).
 work_package_update: title=name,status=active|planned|awaiting
 planning|proposed|completed|blocked,text.
 context_update: target=identity|project|team,text=complete JSON object (preserve other
@@ -56,7 +54,8 @@ drive_move: id,target=folder ID; drive_report: title,text=complete composed Mark
 report.
 permission_set:
 capability=memory|personal_schedule|calendar_write|members|settings|groups|
-reminders|drive_write|project_status|context|send_message; target=* or full member phone;
+reminders|drive_write|project_status|context|send_message|stickers|schedule_manage_others;
+target=* or full member phone;
 effect=allow|deny|approval|reset; approvers=phone list for approval (ANY listed person may
 approve).
 Owner only. More specific member rules override the global rule. Does not grant admin

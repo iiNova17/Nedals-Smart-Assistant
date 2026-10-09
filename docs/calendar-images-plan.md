@@ -1,6 +1,8 @@
 # Calendar subscriptions and image understanding — implementation handoff
 
-Status: Calendar subscriptions, timetable imports and web image upload remain planned. Basic WhatsApp direct/quoted image understanding and saved-sticker sending are now implemented. Updated 9 October 2026.
+Status: Calendar subscriptions, confirmed timetable imports, constrained meeting suggestions, WhatsApp image understanding and sticker sending are implemented. Web image upload and advanced source filters remain future work. Updated 9 October 2026.
+
+This document preserves the original design handoff. The implementation uses live batched free/busy reads rather than an event cache or background calendar refresh. See [the current availability guide](availability.md) for actual behavior and limitations.
 
 ## Objective and boundaries
 

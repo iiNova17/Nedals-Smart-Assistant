@@ -24,6 +24,7 @@ class Actor:
 current_actor: ContextVar[Actor | None] = ContextVar("actor", default=None)
 current_attachment: ContextVar[str] = ContextVar("attachment", default="")
 current_request: ContextVar[str] = ContextVar("request", default="")
+current_image_hash: ContextVar[str] = ContextVar("image_hash", default="")
 
 
 def now():
@@ -51,6 +52,18 @@ class Workspace:
                     kind TEXT NOT NULL,approval_id TEXT NOT NULL DEFAULT '');
                 CREATE TABLE IF NOT EXISTS outbound_stickers(
                     notification_id TEXT PRIMARY KEY,sticker_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS outbound_mentions(
+                    notification_id TEXT PRIMARY KEY,jids TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS schedule_sources(
+                    id TEXT PRIMARY KEY,kind TEXT NOT NULL,payload TEXT NOT NULL,
+                    owner TEXT NOT NULL,created TEXT NOT NULL,status TEXT NOT NULL,
+                    replaces TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS schedule_source_proposals(
+                    id TEXT PRIMARY KEY,requester TEXT NOT NULL,chat TEXT NOT NULL,
+                    payload TEXT NOT NULL,state TEXT NOT NULL,created TEXT NOT NULL,
+                    expires TEXT NOT NULL,request_id TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS schedule_source_checks(
+                    source_id TEXT PRIMARY KEY,checked_at TEXT NOT NULL,status TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS runtime_config(key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS browser_sessions(
                     token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,expires TEXT NOT NULL);

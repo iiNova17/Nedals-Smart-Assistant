@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import logging
 from uuid import uuid4
 
@@ -6,7 +7,7 @@ from app.config import Settings
 from app.db import Database
 from app.domain import Completion, Message, ProviderUnavailable, User
 from app.providers.base import ChatProvider
-from app.workspace import Workspace, current_actor, current_request
+from app.workspace import Workspace, current_actor, current_image_hash, current_request
 
 logger = logging.getLogger("plume")
 
@@ -35,6 +36,9 @@ class Assistant:
         actor = current_actor.get() or self.workspace.actor(user, conversation_id, "web")
         actor_token = current_actor.set(actor)
         request_token = current_request.set(event_id or uuid4().hex)
+        image_token = current_image_hash.set(
+            hashlib.sha256(images[0].data).hexdigest() if images else ""
+        )
         try:
             return await self._reply(
                 actor, conversation_id, text, event_id, reply_context, usage_reserved, images
@@ -42,6 +46,7 @@ class Assistant:
         finally:
             current_actor.reset(actor_token)
             current_request.reset(request_token)
+            current_image_hash.reset(image_token)
 
     async def _reply(
         self,

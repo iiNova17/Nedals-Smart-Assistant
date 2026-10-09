@@ -35,6 +35,9 @@ class ProjectTools(DriveTools):
             "manual_schedules": True,
             "google_calendar_authorization_configured": self.commands.schedule.calendar.ready,
             "reminders": "local process only; offline times are skipped",
+            "whatsapp_private_messages": "Approved members can receive private DM reminders",
+            "calendar_subscriptions": "Persistent member mappings, checked live for availability",
+            "timetable_image_import": "Extract, preview, confirm, save structured intervals",
             "hosting": "owner's local computer",
         }
         creator_name = self.commands.context.read("identity").get("creator", "Owner")
@@ -164,6 +167,12 @@ class ProjectTools(DriveTools):
             "was supplied. Treat team project roles as descriptions, not permission grants."
             "\n=== SCHEDULED TASKS & REMINDERS ==="
             "\nFor reminders and scheduling requests:"
+            "\nPrivate WhatsApp reminders ARE supported. For 'remind me privately', use "
+            "schedule_task_propose with destination='dm'; the backend resolves the requester. "
+            "Never claim DMs are unavailable based on older chat. For another approved member's "
+            "DM use 'member:MEMBER_ID'. For group reminders use destination='current' and "
+            "recipient_ids for the intended people; omission mentions the requester. "
+            "Group reminders contain real WhatsApp mentions. Respect the exact destination."
             "\n1. Always propose the task first using schedule_task_propose and present the exact "
             "interpretation in the preview format (📅 Please confirm this "
             "reminder: When, Where, Message, Repeats. "
@@ -175,6 +184,18 @@ class ProjectTools(DriveTools):
             " my scheduled tasks', query scheduled_tasks_list."
             "\n5. For questions like 'Did you send my reminder?', query scheduled_task_history."
             "\n6. For editing/pausing/cancelling, use scheduled_task_manage."
+            "\n=== CALENDAR SOURCES AND TIMETABLE PHOTOS ==="
+            "\nUse schedule_source_propose for Calendar links and extracted timetable images. "
+            "Bind only the members the user specifies. Retrieve IDs from team_directory. "
+            "For personal sources default to the current speaker. For timetable images extract "
+            "every visible weekday/time accurately; ask about uncertainty and term validity. "
+            "Show the entire returned preview and get separate confirmation before "
+            "schedule_source_confirm. Do not substitute personal_schedule_update or memory_save "
+            "for this import flow. Calendar links do not grant Google access; report failures. "
+            "A lecture timetable alone does not prove complete availability. Use team_availability "
+            "for a proposed time and meeting_suggestions to search for options within constraints. "
+            "Use schedule_sources for durable records and IDs before corrections/removal. "
+            "Labels/course names are private; team conflict checks share busy times only."
             "\nScheduled Calendar writes and Drive reports are not implemented; explain this "
             "limitation rather than claiming to schedule them."
             "\n=== STICKERS POLICY ==="
@@ -227,6 +248,7 @@ class ProjectTools(DriveTools):
                     "start": {"type": "string"},
                     "end": {"type": "string"},
                     "timezone": {"type": "string"},
+                    "members": {"type": "array", "items": {"type": "string"}},
                 },
                 ["start", "end"],
             ),
@@ -273,8 +295,8 @@ class ProjectTools(DriveTools):
             ),
             (
                 "schedule_task_propose",
-                "Propose a scheduled reminder, message, summary, report, or c"
-                "alendar task for user confirmation. Returns preview.",
+                "Propose a reminder, message or summary for separate confirmation. "
+                "Supports private WhatsApp DMs and registered groups. Returns exact preview.",
                 {
                     "task_type": {
                         "type": "string",
@@ -282,7 +304,8 @@ class ProjectTools(DriveTools):
                     },
                     "destination": {
                         "type": "string",
-                        "description": "Registered group JID or 'dm'",
+                        "description": "'dm' for requester privately, 'current' for this chat, "
+                        "'member:ID' for an approved member privately, or a registered group JID",
                     },
                     "schedule": {
                         "type": "object",
@@ -300,6 +323,11 @@ class ProjectTools(DriveTools):
                             "message": {"type": "string"},
                             "title": {"type": "string"},
                             "content": {"type": "string"},
+                            "recipient_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Member IDs to mention; defaults to requester",
+                            },
                         },
                     },
                     "summary": {"type": "string"},
@@ -396,6 +424,9 @@ class ProjectTools(DriveTools):
                 ["action", "sticker_id"],
             ),
         ]
+        from app.availability_tools import DEFINITIONS
+
+        definitions.extend(DEFINITIONS)
         for name, description, properties, required in definitions:
             tools[0].function_declarations.append(
                 types.FunctionDeclaration(
@@ -417,12 +448,19 @@ class ProjectTools(DriveTools):
     async def execute(self, name, arguments):
         actor = current_actor.get()
         try:
+            from app.availability_tools import DEFINITIONS, execute
+
+            if name in {item[0] for item in DEFINITIONS}:
+                if not actor:
+                    return {"error": "Authenticated requester required"}
+                return await asyncio.to_thread(execute, self.commands, actor, name, arguments)
             if name == "team_directory":
                 with self.commands.ws.db.connect() as c:
                     rows = [
                         dict(r)
                         for r in c.execute(
-                            "SELECT u.name,m.phone,p.project_role,p.duties FROM whatsapp_members m "
+                            "SELECT u.id AS member_id,u.name,m.phone,p.project_role,p.duties "
+                            "FROM whatsapp_members m "
                             "JOIN users u ON m.user_id=u.id "
                             "LEFT JOIN member_profiles p ON p.user_id=u.id "
                             "WHERE u.active=1"
@@ -447,11 +485,15 @@ class ProjectTools(DriveTools):
             if name == "team_availability":
                 if not actor or not actor.trusted:
                     return {"error": "Availability is restricted to approved members"}
+                from app.team_availability import TeamAvailability
+
+                selected = self.commands.schedule_sources.members(arguments.get("members"))
                 return await asyncio.to_thread(
-                    self.commands.schedule.availability,
+                    TeamAvailability(self.commands.schedule).check,
                     arguments["start"],
                     arguments["end"],
                     arguments.get("timezone", self.commands.schedule.timezone(actor.user.id)),
+                    [m["id"] for m in selected],
                 )
             if name == "calendar_events":
                 return await asyncio.to_thread(
@@ -509,9 +551,14 @@ class ProjectTools(DriveTools):
                     return {"error": "Authenticated requester required"}
                 dest = arguments.get("destination", "")
                 if dest == "dm" and actor:
-                    dest = actor.chat if actor.channel == "dm" else f"{actor.phone}@s.whatsapp.net"
+                    dest = f"{actor.phone}@s.whatsapp.net"
+                elif dest.startswith("member:"):
+                    recipient = self.commands.schedule_sources.members([dest[7:]])[0]
+                    dest = recipient["phone"] + "@s.whatsapp.net"
                 elif dest in {"current", ""} and actor:
-                    dest = actor.chat
+                    dest = (
+                        actor.chat if actor.channel == "group" else f"{actor.phone}@s.whatsapp.net"
+                    )
                 zone = self.commands.schedule.timezone(actor.user.id)
                 return await asyncio.to_thread(
                     self.commands.schedule.scheduler.propose_task,

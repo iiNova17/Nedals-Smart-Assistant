@@ -1,5 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+
+test('group reminders carry real mention metadata; DMs do not', async () => {
+  const calls = [];
+  const socket = { sendMessage: async (...args) => { calls.push(args); return {key: {id: 'sent'}}; } };
+  await sendReply(socket, '123@g.us', 'Reminder @15555550100', undefined,
+    ['15555550100@s.whatsapp.net', 'bad', '15555550100@s.whatsapp.net']);
+  assert.deepEqual(calls[0][1].mentions, ['15555550100@s.whatsapp.net']);
+  await sendReply(socket, '15555550100@s.whatsapp.net', 'Private reminder', undefined,
+    ['15555550100@s.whatsapp.net']);
+  assert.equal(calls[1][1].mentions, undefined);
+});
 import { quoteFor, sendReply } from '../src/reply.mjs';
 const message={key:{id:'incoming',remoteJid:'123@g.us',participant:'15555550100@s.whatsapp.net'},message:{documentMessage:{fileName:'Manual.pdf',mediaKey:Buffer.from('secret')}}};
 test('quoted reply stores minimal content and links to the triggering message', async()=>{

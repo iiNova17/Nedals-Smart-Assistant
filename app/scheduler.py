@@ -130,7 +130,18 @@ class TaskScheduler(TaskPolicy):
             )
             if not isinstance(message, str) or not 1 <= len(message.strip()) <= 6000:
                 raise ValueError("Supply a message of 1 to 6000 characters")
-            validated_arguments = {"message": message}
+            recipients = validated_arguments.get("recipient_ids", [actor.user.id])
+            if not isinstance(recipients, list) or not 1 <= len(recipients) <= 20:
+                raise ValueError("Select one to twenty reminder recipients")
+            recipients = list(dict.fromkeys(recipients))
+            members = {
+                m["id"]: m
+                for m in self.ws.db.whatsapp_members()
+                if self.ws.can_access(m["phone"]) and self.ws.role(m["phone"]) != "guest"
+            }
+            if any(uid not in members for uid in recipients):
+                raise ValueError("Resolve recipients to active member IDs first")
+            validated_arguments = {"message": message, "recipient_ids": recipients}
         else:
             validated_arguments = {}
         schedule["_proposal_request"] = current_request.get()
@@ -148,7 +159,9 @@ class TaskScheduler(TaskPolicy):
                 raise ValueError("Target group is not registered or disabled")
             dest_name = row["name"]
         else:
-            dest_name = "Direct Message"
+            phone = destination.split("@")[0]
+            recipient = self.ws.db.whatsapp_user(phone)
+            dest_name = f"Private WhatsApp DM to {recipient.name if recipient else phone}"
 
         # Resolve due time
         at_val = schedule.get("at")
@@ -170,6 +183,8 @@ class TaskScheduler(TaskPolicy):
         preview_text = format_proposal_preview(
             task_type, dest_name, due_utc, timezone_str, validated_arguments, recurrence_desc
         )
+        if task_type == "reminder" and destination.endswith("@g.us"):
+            preview_text += "\nNotify: " + ", ".join(members[uid]["name"] for uid in recipients)
 
         expires_at = (datetime.now(UTC) + timedelta(minutes=15)).isoformat()
 
@@ -634,6 +649,19 @@ class TaskScheduler(TaskPolicy):
             body_text = args.get("message") or args.get("content") or args.get("text") or ""
             prefix = "🔔 *Reminder:* " if task_type == "reminder" else ""
             full_text = f"{prefix}{body_text}".strip()
+            mentions = []
+            if task_type == "reminder" and destination.endswith("@g.us"):
+                recipients = args.get("recipient_ids", [creator_id])
+                members = {m["id"]: m for m in self.ws.db.whatsapp_members()}
+                if any(
+                    uid not in members or not self.ws.can_access(members[uid]["phone"])
+                    for uid in recipients
+                ):
+                    raise PermissionError("A reminder recipient is no longer approved")
+                mentions = [members[uid]["phone"] + "@s.whatsapp.net" for uid in recipients]
+                full_text = (
+                    "🔔 " + " ".join("@" + jid.split("@")[0] for jid in mentions) + "\n" + body_text
+                )
             delivery_id = f"notif_{occurrence_id}"
 
             with self.ws.db.connect() as c:
@@ -650,6 +678,11 @@ class TaskScheduler(TaskPolicy):
                     "VALUES (?, ?, 'reminder', '')",
                     (delivery_id, creator_id),
                 )
+                if mentions:
+                    c.execute(
+                        "INSERT OR IGNORE INTO outbound_mentions VALUES (?,?)",
+                        (delivery_id, json.dumps(mentions)),
+                    )
             return "queued", f"Enqueued to notifications: {delivery_id}", delivery_id
 
         elif task_type == "summary":

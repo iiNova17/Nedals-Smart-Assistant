@@ -87,6 +87,7 @@ async function pollNotifications() {
       if (!store.hasJob(id)) store.enqueue(id, n.chat, {
         notification_id: n.id, notification_text: n.body, sender_phone: team.owner_phone,
         notification_kind: n.media_kind,
+        notification_mentions: n.mentions ?? [],
         channel: n.chat.endsWith('@g.us') ? 'group' : 'dm', kind: 'text', chat_id: n.chat, event_id: id, text: n.body,
       });
       const row = store.db.prepare('SELECT state FROM jobs WHERE id=?').get(id);
@@ -317,7 +318,7 @@ async function work() {
     try {
       const sent = sticker
         ? await sendSticker(socket, job.chat, sticker)
-        : await sendReply(socket, job.chat, job.reply, payload.raw_message);
+        : await sendReply(socket, job.chat, job.reply, payload.raw_message, payload.notification_mentions);
       if (!sent?.key?.id) throw new Error('Missing outbound ID');
       store.state(job.id, 'sent', sent.key.id);
       if (payload.notification_id) { try { await notificationState(payload.notification_id, 'sent'); } catch {} }

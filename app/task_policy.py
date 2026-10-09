@@ -22,7 +22,7 @@ class TaskPolicy:
             "group"
             if chat.endswith("@g.us")
             else "dm"
-            if chat.endswith("@s.whatsapp.net")
+            if chat.endswith(("@s.whatsapp.net", "@lid"))
             else "web"
         )
         return self.ws.actor(User(row["id"], row["name"]), chat, channel)
@@ -103,6 +103,13 @@ class TaskPolicy:
         if not task or task["status"] not in {"scheduled", "completed"}:
             return False
         try:
+            args = json.loads(task["validated_arguments"])
+            members = {m["id"]: m for m in self.ws.db.whatsapp_members()}
+            if any(
+                uid not in members or not self.ws.can_access(members[uid]["phone"])
+                for uid in args.get("recipient_ids", [])
+            ):
+                return False
             self.authorize(
                 self.creator(task), task["task_type"], task["destination"], task["approval_state"]
             )

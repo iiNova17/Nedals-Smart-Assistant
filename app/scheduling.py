@@ -55,8 +55,17 @@ class Calendar:
         return self.path.is_file()
 
     def busy(self, calendar_id, start, end):
+        return self.busy_many([calendar_id], start, end).get(calendar_id)
+
+    def busy_many(self, calendar_ids, start, end):
+        calendar_ids = sorted(set(calendar_ids))
+        if len(calendar_ids) > 50:
+            raise ValueError("At most 50 calendars can be checked at once")
+        unknown = {key: None for key in calendar_ids}
+        if not calendar_ids:
+            return {}
         if not self.ready:
-            return None
+            return unknown
         with self.lock:
             service = None
             try:
@@ -76,18 +85,20 @@ class Calendar:
                         body={
                             "timeMin": start.isoformat(),
                             "timeMax": end.isoformat(),
-                            "items": [{"id": calendar_id}],
+                            "items": [{"id": key} for key in calendar_ids],
+                            "calendarExpansionMax": 50,
                             "timeZone": "UTC",
                         }
                     )
                     .execute(num_retries=0)
                 )
-                item = result.get("calendars", {}).get(calendar_id)
-                if not item or item.get("errors"):
-                    return None
-                return item.get("busy", [])
+                output = {}
+                for key in calendar_ids:
+                    item = result.get("calendars", {}).get(key)
+                    output[key] = None if not item or item.get("errors") else item.get("busy", [])
+                return output
             except Exception:
-                return None  # Missing permissions/outages mean unknown, never free.
+                return unknown  # Missing permissions/outages mean unknown, never free.
             finally:
                 if service:
                     service.close()
@@ -268,9 +279,14 @@ class Scheduling:
         return key
 
     def availability(self, start, end, timezone="Africa/Cairo"):
+        from app.team_availability import TeamAvailability
+
+        return TeamAvailability(self).check(start, end, timezone)
+
+    def _legacy_availability(self, start, end, timezone="Africa/Cairo", calendar_results=None):
         a, b = instant(start, timezone), instant(end, timezone)
-        if not timedelta(0) < b - a <= timedelta(days=31):
-            raise ValueError("Check a positive interval of at most 31 days")
+        if not timedelta(0) < b - a <= timedelta(days=31, hours=6):
+            raise ValueError("Availability window exceeds the bounded search limit")
         output = []
         for member in self.ws.db.whatsapp_members():
             if self.ws.role(member["phone"]) == "guest":
@@ -317,7 +333,15 @@ class Scheduling:
                                 "source": "manual schedule",
                             }
                         )
-            external = self.calendar.busy(link[0], a, b) if link else None
+            external = (
+                (
+                    calendar_results.get(link[0])
+                    if calendar_results is not None
+                    else self.calendar.busy(link[0], a, b)
+                )
+                if link
+                else None
+            )
             if external:
                 conflicts.extend({**item, "source": "Google Calendar"} for item in external)
             complete = bool(
@@ -329,6 +353,7 @@ class Scheduling:
             known = (external is not None) if link else complete
             output.append(
                 {
+                    "member_id": member["id"],
                     "name": profile["name"] if profile else member["name"],
                     "status": "busy"
                     if conflicts
@@ -342,12 +367,21 @@ class Scheduling:
                 }
             )
         shared_id = self.ws.get("shared_calendar", "")
-        shared_busy = self.calendar.busy(shared_id, a, b) if shared_id else None
+        shared_busy = (
+            (
+                calendar_results.get(shared_id)
+                if calendar_results is not None
+                else self.calendar.busy(shared_id, a, b)
+            )
+            if shared_id
+            else None
+        )
         return {
             "start": a.isoformat(),
             "end": b.isoformat(),
             "members": output,
             "shared_calendar": {
+                "configured": bool(shared_id),
                 "status": "unknown"
                 if shared_busy is None
                 else "busy"
@@ -364,11 +398,8 @@ class Scheduling:
     def create_reminder(self, actor, chat, body, due, recurrence, timezone):
         if not actor.admin:
             raise PermissionError("Admin only")
+        self.scheduler.authorize(actor, "reminder", chat, "{}")
         with self.ws.db.connect() as c:
-            if not c.execute(
-                "SELECT 1 FROM registered_groups WHERE chat=? AND enabled=1", (chat,)
-            ).fetchone():
-                raise ValueError("Register the target group first with /admin group remember Name")
             if c.execute("SELECT COUNT(*) FROM reminders WHERE active=1").fetchone()[0] >= 100:
                 raise ValueError("Limit of 100 active reminders reached")
             key = uuid4().hex[:12]
@@ -413,15 +444,25 @@ class Scheduling:
                     c.execute("UPDATE reminders SET active=0 WHERE id=?", (r["id"],))
                     continue
                 due = datetime.fromisoformat(r["next_due"])
-                enabled = c.execute(
-                    "SELECT 1 FROM registered_groups WHERE chat=? AND enabled=1", (r["chat"],)
-                ).fetchone()
-                state = "pending" if clock - due <= timedelta(minutes=15) and enabled else "missed"
+                state = "pending" if clock - due <= timedelta(minutes=15) else "missed"
                 key = r["id"] + ":" + r["next_due"]
                 c.execute(
                     "INSERT OR IGNORE INTO notifications VALUES (?,?,?,?,?,?)",
                     (key, r["id"], r["chat"], r["body"], now(), state),
                 )
+                if state == "pending" and r["chat"].endswith("@g.us"):
+                    member = c.execute(
+                        "SELECT phone FROM whatsapp_members WHERE user_id=?", (r["creator"],)
+                    ).fetchone()
+                    if member:
+                        c.execute(
+                            "INSERT OR IGNORE INTO outbound_mentions VALUES (?,?)",
+                            (key, json.dumps([member[0] + "@s.whatsapp.net"])),
+                        )
+                        c.execute(
+                            "UPDATE notifications SET body=? WHERE id=? AND state='pending'",
+                            (f"🔔 @{member[0]}\n{r['body']}", key),
+                        )
                 rule = json.loads(r["recurrence"])
                 following = self.next_time(due, rule, r["timezone"])
                 while following and following <= clock:
@@ -494,8 +535,7 @@ class Scheduling:
                 return item["chat"] in self.ws.policy()["groups"]
             legacy = c.execute(
                 "SELECT r.* FROM notifications n JOIN reminders r ON n.reminder_id=r.id "
-                "JOIN registered_groups g ON n.chat=g.chat "
-                "WHERE n.id=? AND n.state IN ('pending','queued') AND g.enabled=1",
+                "WHERE n.id=? AND n.state IN ('pending','queued')",
                 (key,),
             ).fetchone()
             return bool(legacy and self._legacy_reminder_allowed(legacy))

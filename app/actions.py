@@ -21,6 +21,7 @@ CAPABILITIES = MEMBER_CAPABILITIES | {
     "project_status",
     "context",
     "send_message",
+    "schedule_manage_others",
 }
 
 
@@ -41,6 +42,11 @@ class Actions:
             return [dict(r) for r in c.execute("SELECT * FROM capability_rules")]
 
     def describe(self, command, actor):
+        if command.startswith("@schedule_source "):
+            _, payload = self.cmd.schedule_sources._proposal(actor, command.split()[1])
+            return "Confirm these schedule source changes: " + json.dumps(
+                payload, ensure_ascii=False
+            )
         if command.startswith("@scheduled "):
             task = self.cmd.schedule.scheduler.get_task(command.split()[1])
             return "Approve scheduled task, including its stated recurrence: " + json.dumps(
@@ -265,7 +271,13 @@ class Actions:
             allowed = self.check(requester, row["capability"])
             if allowed and actor.phone not in allowed:
                 raise PermissionError("Approval rules changed; a current approver is required")
-            if row["command"].startswith("@scheduled "):
+            if row["command"].startswith("@schedule_source "):
+                result = json.dumps(
+                    self.cmd.schedule_sources.confirm(
+                        requester, row["command"].split()[1], approved_by=actor.phone
+                    )
+                )
+            elif row["command"].startswith("@scheduled "):
                 result = self.cmd.schedule.scheduler.approve(
                     row["command"].split()[1], requester, actor.phone
                 )

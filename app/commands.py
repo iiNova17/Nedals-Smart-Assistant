@@ -79,6 +79,9 @@ class Commands:
 
         self.actions = Actions(self)
         self.schedule.scheduler.actions = self.actions
+        from app.schedule_sources import ScheduleSources
+
+        self.schedule_sources = ScheduleSources(self)
 
     def about(self, actor):
         identity, project = self.context.read("identity"), self.context.read("project")
@@ -495,7 +498,7 @@ class Commands:
                 raise ValueError("Use remind once DATETIME, daily N HH:MM, or weekly Mon,Wed HH:MM")
             if due <= clock:
                 raise ValueError("Reminder time must be in the future")
-            chat = actor.chat if actor.channel == "group" else self.ws.get("reminder_target", "")
+            chat = actor.chat if actor.channel == "group" else f"{actor.phone}@s.whatsapp.net"
             proposal = self.schedule.scheduler.propose_task(
                 actor,
                 "reminder",

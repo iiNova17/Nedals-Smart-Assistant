@@ -1,6 +1,7 @@
 """Trusted local bridge ingress. All user and group access is checked again here."""
 
 import asyncio
+import json
 import secrets
 import time
 from typing import Annotated, Literal
@@ -114,6 +115,11 @@ def router(
                     "WHERE n.state IN ('pending','queued') ORDER BY n.created LIMIT 10"
                 )
             ]
+            for row in rows:
+                mentions = c.execute(
+                    "SELECT jids FROM outbound_mentions WHERE notification_id=?", (row["id"],)
+                ).fetchone()
+                row["mentions"] = json.loads(mentions[0]) if mentions else []
         return {"notifications": rows}
 
     @routes.get("/notifications/{key}/media", dependencies=[Depends(bridge_auth)])
