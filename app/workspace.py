@@ -22,6 +22,7 @@ class Actor:
 
 
 current_actor: ContextVar[Actor | None] = ContextVar("actor", default=None)
+current_attachment: ContextVar[str] = ContextVar("attachment", default="")
 current_request: ContextVar[str] = ContextVar("request", default="")
 
 
@@ -48,6 +49,8 @@ class Workspace:
                 CREATE TABLE IF NOT EXISTS outbound_metadata(
                     notification_id TEXT PRIMARY KEY,sender TEXT NOT NULL,
                     kind TEXT NOT NULL,approval_id TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS outbound_stickers(
+                    notification_id TEXT PRIMARY KEY,sticker_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS runtime_config(key TEXT PRIMARY KEY,value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS browser_sessions(
                     token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,expires TEXT NOT NULL);
@@ -95,6 +98,38 @@ class Workspace:
                     id INTEGER PRIMARY KEY,name TEXT NOT NULL,old_status TEXT,new_status TEXT
                 NOT NULL,
                     notes TEXT NOT NULL,updated TEXT NOT NULL,author TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS scheduled_tasks(
+                    task_id TEXT PRIMARY KEY,creator_user_id TEXT NOT NULL,
+                    origin_chat TEXT NOT NULL,destination TEXT NOT NULL,
+                    task_type TEXT NOT NULL,validated_arguments TEXT NOT NULL,
+                    timezone TEXT NOT NULL DEFAULT 'Africa/Cairo',
+                    schedule TEXT NOT NULL,next_run_at TEXT NOT NULL,
+                    required_capabilities TEXT NOT NULL DEFAULT '[]',
+                    approval_state TEXT NOT NULL DEFAULT 'approved',
+                    status TEXT NOT NULL DEFAULT 'scheduled',
+                    created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+                    last_result TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS task_proposals(
+                    proposal_id TEXT PRIMARY KEY,creator_user_id TEXT NOT NULL,
+                    origin_chat TEXT NOT NULL,task_type TEXT NOT NULL,
+                    destination TEXT NOT NULL,validated_arguments TEXT NOT NULL,
+                    schedule TEXT NOT NULL,timezone TEXT NOT NULL,
+                    summary TEXT NOT NULL,created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending');
+                CREATE TABLE IF NOT EXISTS task_executions(
+                    occurrence_id TEXT PRIMARY KEY,task_id TEXT NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 1,scheduled_for TEXT NOT NULL,
+                    started_at TEXT NOT NULL,completed_at TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL,result TEXT NOT NULL DEFAULT '',
+                    delivery_id TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS stickers(
+                    id TEXT PRIMARY KEY,name TEXT NOT NULL,description TEXT NOT NULL DEFAULT '',
+                    usage_guidance TEXT NOT NULL DEFAULT '',creator_user_id TEXT NOT NULL,
+                    visibility TEXT NOT NULL DEFAULT 'shared',sha256 TEXT NOT NULL UNIQUE,
+                    storage_path TEXT NOT NULL,drive_file_id TEXT NOT NULL DEFAULT '',
+                    mime_type TEXT NOT NULL DEFAULT 'image/webp',
+                    is_animated INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL);
                 INSERT OR IGNORE INTO access_members(phone,allowed)
                     SELECT phone,1 FROM whatsapp_members;
             """)
@@ -123,6 +158,56 @@ class Workspace:
         if not r or r["blocked"] or not r["allowed"]:
             return "guest"
         return "admin" if r["admin"] else "member"
+
+    def is_name_known(self, actor: Actor | None) -> bool:
+        if not actor or not actor.phone:
+            return bool(
+                actor
+                and actor.user
+                and not actor.user.name.startswith("Visitor ")
+                and actor.user.name != "User"
+            )
+        role = self.role(actor.phone)
+        if role == "guest":
+            return False
+        with self.db.connect() as c:
+            r = c.execute(
+                "SELECT u.name FROM users u JOIN whatsapp_members m ON u.id=m.user_id "
+                "WHERE m.phone=? AND u.active=1",
+                (actor.phone,),
+            ).fetchone()
+            if r and not r[0].startswith("Visitor ") and r[0] != "User":
+                return True
+        return False
+
+    def is_creator(self, actor: Actor | None) -> bool:
+        return bool(actor and actor.phone and actor.phone == self.owner_phone())
+
+    def speaker_record(self, actor: Actor | None, timezone: str = "Africa/Cairo") -> dict:
+        is_creator = self.is_creator(actor)
+        name_known = self.is_name_known(actor)
+        speaker_name = actor.user.name if (actor and name_known) else None
+        role = (
+            "owner"
+            if is_creator
+            else (
+                "admin"
+                if (actor and actor.admin)
+                else ("member" if (actor and actor.trusted) else "guest")
+            )
+        )
+        return {
+            "name": speaker_name,
+            "name_known": name_known,
+            "role": role,
+            "is_creator": is_creator,
+            "is_admin": bool(actor and actor.admin),
+            "is_trusted_member": bool(actor and actor.trusted),
+            "phone": actor.phone if actor else "",
+            "chat": actor.chat if actor else "",
+            "channel": actor.channel if actor else "web",
+            "timezone": timezone,
+        }
 
     def policy(self):
         with self.db.connect() as c:

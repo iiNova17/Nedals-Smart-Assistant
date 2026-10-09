@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 
@@ -9,9 +9,16 @@ class User:
 
 
 @dataclass(frozen=True)
+class ImageInput:
+    data: bytes = field(repr=False)
+    mime_type: str = "image/png"
+
+
+@dataclass(frozen=True)
 class Message:
     role: Literal["user", "assistant"]
     text: str
+    images: tuple[ImageInput, ...] = ()
 
 
 @dataclass(frozen=True)

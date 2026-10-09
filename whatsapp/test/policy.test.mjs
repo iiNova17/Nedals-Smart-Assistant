@@ -11,6 +11,18 @@ const options = { groupId: '123@g.us', ownerPhone: owner, senderPhone: owner,
 const message = content => ({ key: { id: 'm1', remoteJid: '123@g.us', participant: `${owner}@s.whatsapp.net` },
   messageTimestamp: Math.floor(Date.now() / 1000), message: content });
 
+test('images retain captions and mentions while ordinary group photos stay quiet', () => {
+  assert.equal(extractMessage(message({imageMessage: {caption: 'Look at this'}}), options), null);
+  const captioned = extractMessage(message({imageMessage: {caption: 'Describe this',
+    contextInfo: {mentionedJid: [bot]}}}), options);
+  assert.equal(captioned.kind, 'image');
+  assert.equal(captioned.text, 'Describe this');
+  const dm = message({imageMessage: {}});
+  dm.key.remoteJid = owner + '@s.whatsapp.net';
+  assert.equal(extractMessage(dm, options).kind, 'image');
+  assert.equal(extractMessage(dm, {...options, senderPhone: '15555550999'}), null);
+});
+
 test('three runtime modes, block precedence, pause and live whitelist changes', () => {
   const member='15555550200', stranger='15555550900';
   const policy={owner,mode:'whitelist',groups:['123@g.us'],members:[{phone:member,allowed:1,blocked:0}],group_trigger:'mention'};

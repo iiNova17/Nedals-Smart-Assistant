@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from app.scheduling import instant
 from app.workspace import current_request, now
 
-MEMBER_CAPABILITIES = {"memory", "personal_schedule", "calendar_write"}
+MEMBER_CAPABILITIES = {"memory", "personal_schedule", "calendar_write", "stickers"}
 CAPABILITIES = MEMBER_CAPABILITIES | {
     "members",
     "settings",
@@ -41,6 +41,11 @@ class Actions:
             return [dict(r) for r in c.execute("SELECT * FROM capability_rules")]
 
     def describe(self, command, actor):
+        if command.startswith("@scheduled "):
+            task = self.cmd.schedule.scheduler.get_task(command.split()[1])
+            return "Approve scheduled task, including its stated recurrence: " + json.dumps(
+                task, ensure_ascii=False
+            )
         if command.startswith("@message "):
             payload = json.loads(command[9:])
             return f"Send a message to {payload['target']}:\n{payload['text']}"
@@ -260,7 +265,11 @@ class Actions:
             allowed = self.check(requester, row["capability"])
             if allowed and actor.phone not in allowed:
                 raise PermissionError("Approval rules changed; a current approver is required")
-            if row["command"].startswith("@message "):
+            if row["command"].startswith("@scheduled "):
+                result = self.cmd.schedule.scheduler.approve(
+                    row["command"].split()[1], requester, actor.phone
+                )
+            elif row["command"].startswith("@message "):
                 data = json.loads(row["command"][9:])
                 result = json.dumps(self.queue_message(requester, **data))
             else:

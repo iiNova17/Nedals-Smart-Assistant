@@ -9,9 +9,16 @@ export const phoneOf = jid => {
 export async function resolvePhone(primary, alternate, mapping) {
   const direct = phoneOf(primary);
   if (direct) return direct;
+  const alt = phoneOf(alternate);
+  if (alt) return alt;
   if (!normalize(primary).endsWith('@lid')) return null;
   // Alternate identity comes from the decoded WhatsApp envelope, never message text.
-  return phoneOf(alternate) ?? phoneOf(await mapping.getPNForLID(normalize(primary)));
+  try {
+    const fromLid = await mapping?.getPNForLID?.(normalize(primary));
+    return phoneOf(fromLid);
+  } catch {
+    return null;
+  }
 }
 
 export function canReply(policy, phone, chat, group) {
@@ -36,17 +43,21 @@ export function extractMessage(message, { groupId, approvedPhones, policy, sende
   if (!content) return null;
   const document = content.documentMessage;
   const extended = content.extendedTextMessage;
-  const text = content.conversation ?? extended?.text ?? document?.caption ?? '';
-  const context = extended?.contextInfo ?? document?.contextInfo;
+  const audio = content.audioMessage;
+  const sticker = content.stickerMessage;
+  const image = content.imageMessage;
+  const text = content.conversation ?? extended?.text ?? document?.caption ?? audio?.caption ?? image?.caption ?? '';
+  const context = extended?.contextInfo ?? document?.contextInfo ?? audio?.contextInfo ?? sticker?.contextInfo ?? image?.contextInfo;
   const mentioned = (context?.mentionedJid ?? []).some(jid => botIds.has(normalize(jid)));
   const replied = isOurReply(key.remoteJid, context?.stanzaId);
   const commanded = /^\/(assistant|nedal|plume|admin|about|help|status|remember|replace|forget|memories|history|busy|schedule|timezone|availability|calendar|confirm)(?:\s|$)/i.test(text);
+  const kind = document ? 'document' : (audio ? 'audio' : (sticker ? 'sticker' : (image ? 'image' : 'text')));
   // Documents are the explicitly requested exception to the quiet-group rule.
   if (group && policy?.group_trigger !== 'all' && !mentioned && !replied && !commanded && !document) return null;
-  if (!document && (!text.trim() || text.length > 8000)) return null;
+  if (kind === 'text' && (!text.trim() || text.length > 8000)) return null;
   return {
     event_id: key.id, sender_phone: senderPhone, chat_id: key.remoteJid,
-    channel: group ? 'group' : 'dm', kind: document ? 'document' : 'text',
+    channel: group ? 'group' : 'dm', kind,
     text: text.slice(0, 8000),
   };
 }

@@ -132,6 +132,7 @@ def create_app(settings: Settings | None = None, provider: ChatProvider | None =
                     )
             workspace.set("groups_initialized", True)
         db.cleanup(settings.context_days)
+        commands.schedule.scheduler.recover()
         cleanup_task = asyncio.create_task(cleanup_loop())
         knowledge_task = asyncio.create_task(knowledge_loop()) if knowledge else None
         reminder_task = asyncio.create_task(reminder_loop())

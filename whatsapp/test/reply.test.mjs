@@ -23,3 +23,44 @@ test('notifications and mismatched quote destinations are sent without quotes',a
   assert.deepEqual(options,{});
  }
 });
+
+test('extractReplyContext extracts text, audio, and sticker quoted metadata safely', async()=>{
+ const { extractReplyContext } = await import('../src/reply.mjs');
+ const textReply = {
+  key: { remoteJid: '123@g.us', id: 'curr1' },
+  message: {
+   extendedTextMessage: {
+    text: 'What time is this?',
+    contextInfo: {
+     stanzaId: 'orig1',
+     participant: '15555550100@s.whatsapp.net',
+     quotedMessage: { conversation: 'The arm review is Friday at 6' }
+    }
+   }
+  }
+ };
+ const res = extractReplyContext(textReply);
+ assert.equal(res.message_id, 'orig1');
+ assert.equal(res.author_identifier, '15555550100');
+ assert.equal(res.content_type, 'text');
+ assert.equal(res.text_or_caption, 'The arm review is Friday at 6');
+
+ const lidReply = {
+  key: { remoteJid: '123@g.us', id: 'curr2' },
+  message: {
+   extendedTextMessage: {
+    text: 'Check this',
+    contextInfo: {
+     stanzaId: 'orig2',
+     participant: '99887766@lid',
+     quotedMessage: { audioMessage: { ptt: true } }
+    }
+   }
+  }
+ };
+ const resLid = extractReplyContext(lidReply);
+ assert.equal(resLid.message_id, 'orig2');
+ assert.equal(resLid.author_identifier, '99887766@lid');
+ assert.equal(resLid.content_type, 'audio');
+ assert.equal(resLid.has_attachment, true);
+});

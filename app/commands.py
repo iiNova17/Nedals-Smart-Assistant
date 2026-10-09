@@ -69,11 +69,16 @@ class Commands:
     def __init__(self, workspace, settings, drive=None, ingestion=None):
         self.ws, self.settings = workspace, settings
         self.context = ContextFiles(settings.context_path)
-        self.schedule = Scheduling(workspace, settings)
         self.drive, self.ingestion = drive, ingestion
+        self.schedule = Scheduling(workspace, settings, drive=drive)
+        from app.stickers import StickerManager
+
+        sticker_dir = settings.database_path.parent / "stickers"
+        self.stickers = StickerManager(workspace, sticker_dir, drive=drive)
         from app.actions import Actions
 
         self.actions = Actions(self)
+        self.schedule.scheduler.actions = self.actions
 
     def about(self, actor):
         identity, project = self.context.read("identity"), self.context.read("project")
@@ -158,11 +163,10 @@ class Commands:
             return result
         if command == "/confirm":
             with self.ws.db.connect() as c:
-                c.execute("BEGIN IMMEDIATE")
                 row = c.execute("SELECT * FROM pending_actions WHERE id=?", (argument,)).fetchone()
+            if row:
                 if (
-                    not row
-                    or row["actor"] != actor.user.id
+                    row["actor"] != actor.user.id
                     or row["chat"] != actor.chat
                     or row["used"]
                     or datetime.now(UTC) - datetime.fromisoformat(row["created"])
@@ -171,8 +175,13 @@ class Commands:
                     raise ValueError(
                         "Proposal is missing, expired, used, or belongs to another conversation"
                     )
-                c.execute("UPDATE pending_actions SET used=1 WHERE id=?", (argument,))
-            return self.execute(actor, row["command"], cid)
+                with self.ws.db.connect() as c:
+                    c.execute("UPDATE pending_actions SET used=1 WHERE id=?", (argument,))
+                return self.execute(actor, row["command"], cid)
+            ok, msg, _ = self.schedule.scheduler.confirm_proposal(
+                actor, proposal_id=argument or None, chat=actor.chat
+            )
+            return msg
         if command in {"/remember", "/replace"}:
             needed = 3 if command == "/replace" else 2
             if len(parts) != needed:
@@ -487,11 +496,15 @@ class Commands:
             if due <= clock:
                 raise ValueError("Reminder time must be in the future")
             chat = actor.chat if actor.channel == "group" else self.ws.get("reminder_target", "")
-            key = self.schedule.create_reminder(actor, chat, body[0], due, rule, zone)
-            return (
-                f"Reminder {key} saved for {due.astimezone(ZoneInfo(zone)).isoformat()} "
-                f"({zone}). Runs while this computer is online."
+            proposal = self.schedule.scheduler.propose_task(
+                actor,
+                "reminder",
+                chat or f"{actor.phone}@s.whatsapp.net",
+                {"message": body[0]},
+                {**rule, "at": due.isoformat()},
+                zone,
             )
+            return proposal["preview"]
         if action == "cancel":
             if len(args) != 2:
                 raise ValueError("Supply a reminder ID")

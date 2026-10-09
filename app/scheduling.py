@@ -230,9 +230,12 @@ class Calendar:
 
 
 class Scheduling:
-    def __init__(self, workspace, settings):
+    def __init__(self, workspace, settings, drive=None):
         self.ws, self.settings = workspace, settings
         self.calendar = Calendar(settings.calendar_token_path)
+        from app.scheduler import TaskScheduler
+
+        self.scheduler = TaskScheduler(workspace, settings, drive=drive)
 
     def timezone(self, user_id):
         with self.ws.db.connect() as c:
@@ -406,6 +409,9 @@ class Scheduling:
             for r in c.execute(
                 "SELECT * FROM reminders WHERE active=1 AND next_due<=?", (clock.isoformat(),)
             ).fetchall():
+                if not self._legacy_reminder_allowed(r):
+                    c.execute("UPDATE reminders SET active=0 WHERE id=?", (r["id"],))
+                    continue
                 due = datetime.fromisoformat(r["next_due"])
                 enabled = c.execute(
                     "SELECT 1 FROM registered_groups WHERE chat=? AND enabled=1", (r["chat"],)
@@ -424,6 +430,17 @@ class Scheduling:
                     "UPDATE reminders SET next_due=?,active=? WHERE id=?",
                     ((following or due).isoformat(), int(following is not None), r["id"]),
                 )
+        self.scheduler.tick(clock)
+
+    def _legacy_reminder_allowed(self, reminder):
+        try:
+            actor = self.scheduler.creator(
+                {"creator_user_id": reminder["creator"], "origin_chat": reminder["chat"]}
+            )
+            self.scheduler.authorize(actor, "reminder", reminder["chat"], "{}")
+            return True
+        except (ValueError, PermissionError):
+            return False
 
     def notification_allowed(self, key):
         if self.ws.get("paused", False):
@@ -436,6 +453,20 @@ class Scheduling:
                 (key,),
             ).fetchone()
             if item:
+                if item["kind"] == "sticker":
+                    from app.stickers import StickerManager
+
+                    try:
+                        StickerManager(
+                            self.ws, self.settings.database_path.parent / "stickers"
+                        ).delivery_bytes(key)
+                        return True
+                    except (ValueError, PermissionError, OSError):
+                        return False
+                if str(item["reminder_id"]).startswith(
+                    "task_"
+                ) and not self.scheduler.delivery_allowed(item["reminder_id"]):
+                    return False
                 sender = c.execute(
                     "SELECT m.phone FROM whatsapp_members m JOIN users u ON m.user_id=u.id "
                     "WHERE u.id=? AND u.active=1",
@@ -461,10 +492,10 @@ class Scheduling:
                     phone = item["chat"].split("@")[0]
                     return self.ws.role(phone) != "guest" and self.ws.can_access(phone)
                 return item["chat"] in self.ws.policy()["groups"]
-            return bool(
-                c.execute(
-                    "SELECT 1 FROM notifications n JOIN registered_groups g ON n.chat=g.chat "
-                    "WHERE n.id=? AND n.state IN ('pending','queued') AND g.enabled=1",
-                    (key,),
-                ).fetchone()
-            )
+            legacy = c.execute(
+                "SELECT r.* FROM notifications n JOIN reminders r ON n.reminder_id=r.id "
+                "JOIN registered_groups g ON n.chat=g.chat "
+                "WHERE n.id=? AND n.state IN ('pending','queued') AND g.enabled=1",
+                (key,),
+            ).fetchone()
+            return bool(legacy and self._legacy_reminder_allowed(legacy))

@@ -8,9 +8,10 @@ import makeWASocket, { DisconnectReason, downloadMediaMessage, normalizeMessageC
 import pino from 'pino';
 import QRCode from 'qrcode';
 import { Store } from './store.mjs';
-import { quoteFor, sendReply } from './reply.mjs';
+import { quoteFor, sendReply, extractReplyContext } from './reply.mjs';
 import { approvedGroup, canReply, extractMessage, normalize, phoneOf, resolvePhone } from './policy.mjs';
 import { saveAttachment, discardAttachment } from './media.mjs';
+import { fetchSticker, sendSticker } from './stickers.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 if (existsSync(resolve(root, '.env'))) loadEnvFile(resolve(root, '.env'));
@@ -85,6 +86,7 @@ async function pollNotifications() {
       const id = 'notification:' + n.id;
       if (!store.hasJob(id)) store.enqueue(id, n.chat, {
         notification_id: n.id, notification_text: n.body, sender_phone: team.owner_phone,
+        notification_kind: n.media_kind,
         channel: n.chat.endsWith('@g.us') ? 'group' : 'dm', kind: 'text', chat_id: n.chat, event_id: id, text: n.body,
       });
       const row = store.db.prepare('SELECT state FROM jobs WHERE id=?').get(id);
@@ -145,8 +147,12 @@ async function receive(message) {
   const key = message.key ?? {};
   const group = key.remoteJid?.endsWith('@g.us');
 
-  const sender = await resolvePhone(group ? key.participant : key.remoteJid,
-    group ? key.participantAlt : key.remoteJidAlt, socket.signalRepository.lidMapping);
+  const participantJid = group ? (key.participant || message.participant) : key.remoteJid;
+  const participantAlt = group
+    ? (key.participantAlt || message.participantAlt || key.participantPn || message.participantPn)
+    : (key.remoteJidAlt || message.remoteJidAlt || key.remoteJidPn || message.remoteJidPn);
+
+  const sender = await resolvePhone(participantJid, participantAlt, socket?.signalRepository?.lidMapping);
   let policy = await accessPolicy();
   if (group && !policy.groups?.includes(key.remoteJid)) {
     await syncGroups();
@@ -159,16 +165,77 @@ async function receive(message) {
   if (!payload || (group && !await allowedGroup(key.remoteJid))) return;
   const eventId = `${key.remoteJid}:${sender}:${key.id}`;
   if (store.hasJob(eventId)) return;
+
+  const content = normalizeMessageContent(message.message);
   if (payload.kind === 'document') {
-    const document = normalizeMessageContent(message.message).documentMessage;
-    payload.filename = String(document.fileName ?? 'attachment').slice(0, 200);
+    const document = content?.documentMessage;
+    payload.filename = String(document?.fileName ?? 'attachment').slice(0, 200);
     Object.assign(payload, await saveAttachment(incomingDir, eventId, () =>
       downloadMediaMessage(message, 'stream', { options: { signal: AbortSignal.timeout(45000) } },
-        { logger, reuploadRequest: socket.updateMediaMessage }), document.fileLength));
+        { logger, reuploadRequest: socket.updateMediaMessage }), document?.fileLength));
+  } else if (payload.kind === 'image') {
+    payload.filename = 'image';
+    Object.assign(payload, await saveAttachment(incomingDir, eventId, () =>
+      downloadMediaMessage(message, 'stream', { options: { signal: AbortSignal.timeout(45000) } },
+        { logger, reuploadRequest: socket.updateMediaMessage }), content?.imageMessage?.fileLength));
+  } else if (payload.kind === 'audio') {
+    const audio = content?.audioMessage;
+    payload.filename = 'voice_note.ogg';
+    Object.assign(payload, await saveAttachment(incomingDir, eventId, () =>
+      downloadMediaMessage(message, 'stream', { options: { signal: AbortSignal.timeout(45000) } },
+        { logger, reuploadRequest: socket.updateMediaMessage }), audio?.fileLength));
+  } else if (payload.kind === 'sticker') {
+    const sticker = content?.stickerMessage;
+    payload.filename = 'sticker.webp';
+    Object.assign(payload, await saveAttachment(incomingDir, eventId, () =>
+      downloadMediaMessage(message, 'stream', { options: { signal: AbortSignal.timeout(45000) } },
+        { logger, reuploadRequest: socket.updateMediaMessage }), sticker?.fileLength));
   }
+
+  const replyContext = extractReplyContext(message);
+  if (replyContext) {
+    if (replyContext.has_attachment && replyContext.quoted_raw) {
+      try {
+        const quotedEnvelope = {
+          key: {
+            remoteJid: key.remoteJid,
+            id: replyContext.message_id,
+            participant: replyContext.author_identifier,
+          },
+          message: replyContext.quoted_raw,
+        };
+        const mediaId = `${eventId}:reply:${replyContext.message_id}`;
+        const attachment = await saveAttachment(incomingDir, mediaId, () =>
+          downloadMediaMessage(quotedEnvelope, 'stream', { options: { signal: AbortSignal.timeout(30000) } },
+            { logger, reuploadRequest: socket.updateMediaMessage }));
+        replyContext.attachment_reference = attachment.file_token;
+        if (attachment.media_error) {
+          replyContext.unavailable = true;
+          replyContext.media_error = attachment.media_error;
+        }
+      } catch {
+        replyContext.unavailable = true;
+        replyContext.media_error = 'download_failed';
+      }
+    }
+    payload.reply_context = {
+      message_id: replyContext.message_id,
+      chat_id: replyContext.chat_id,
+      author_identifier: replyContext.author_identifier,
+      content_type: replyContext.content_type,
+      text_or_caption: replyContext.text_or_caption,
+      attachment_reference: replyContext.attachment_reference || '',
+      unavailable: Boolean(replyContext.unavailable),
+      media_error: replyContext.media_error || '',
+    };
+  }
+
   payload.raw_message = quoteFor(message);
   if (!store.enqueue(eventId, key.remoteJid, payload)) {
     await discardAttachment(incomingDir, payload.file_token);
+    if (payload.reply_context?.attachment_reference) {
+      await discardAttachment(incomingDir, payload.reply_context.attachment_reference);
+    }
   }
 }
 
@@ -183,7 +250,11 @@ async function work() {
     if (!canReply(policy, payload.sender_phone, job.chat, payload.channel === 'group') ||
         (payload.channel === 'group' && !await allowedGroup(job.chat))) {
       store.state(job.id, 'blocked');
-      await discardAttachment(incomingDir, payload.file_token); return;
+      await discardAttachment(incomingDir, payload.file_token);
+      if (payload.reply_context?.attachment_reference) {
+        await discardAttachment(incomingDir, payload.reply_context.attachment_reference);
+      }
+      return;
     }
     if (payload.notification_id) {
       const permission = await notificationState(payload.notification_id);
@@ -201,7 +272,11 @@ async function work() {
         body: JSON.stringify(backendPayload), signal: AbortSignal.timeout(135000),
       });
       if (response.status === 401 || response.status === 403) {
-        store.state(job.id, 'blocked'); await discardAttachment(incomingDir, payload.file_token);
+        store.state(job.id, 'blocked');
+        await discardAttachment(incomingDir, payload.file_token);
+        if (payload.reply_context?.attachment_reference) {
+          await discardAttachment(incomingDir, payload.reply_context.attachment_reference);
+        }
         safeStatus('A message was blocked by backend authorization.'); return;
       }
       if (response.status === 429 && !response.headers.has('Retry-After')) {
@@ -214,13 +289,35 @@ async function work() {
       }
       store.ready(job.id, result.text);
       await discardAttachment(incomingDir, payload.file_token);
+      if (payload.reply_context?.attachment_reference) {
+        await discardAttachment(incomingDir, payload.reply_context.attachment_reference);
+      }
       return;
     }
     if (!connected || (payload.channel === 'group' && !await allowedGroup(job.chat))) return;
+    let sticker;
+    if (payload.notification_id && payload.notification_kind === 'sticker') {
+      try {
+        sticker = await fetchSticker(backend, token, payload.notification_id);
+      } catch {
+        if (job.attempts >= 2) {
+          store.state(job.id, 'failed');
+          await notificationState(payload.notification_id, 'cancelled');
+        } else store.retry(job);
+        return;
+      }
+      if (!(await notificationState(payload.notification_id)).allowed) {
+        store.state(job.id, 'blocked');
+        await notificationState(payload.notification_id, 'cancelled');
+        return;
+      }
+    }
     // A crash after sending is ambiguous. Never automatically replay that send.
     store.state(job.id, 'sending');
     try {
-      const sent = await sendReply(socket, job.chat, job.reply, payload.raw_message);
+      const sent = sticker
+        ? await sendSticker(socket, job.chat, sticker)
+        : await sendReply(socket, job.chat, job.reply, payload.raw_message);
       if (!sent?.key?.id) throw new Error('Missing outbound ID');
       store.state(job.id, 'sent', sent.key.id);
       if (payload.notification_id) { try { await notificationState(payload.notification_id, 'sent'); } catch {} }

@@ -23,20 +23,42 @@ class Assistant:
         self.lock = asyncio.Lock()
 
     async def reply(
-        self, user: User, conversation_id: str, text: str, event_id: str | None = None
+        self,
+        user: User,
+        conversation_id: str,
+        text: str,
+        event_id: str | None = None,
+        reply_context=None,
+        usage_reserved=False,
+        images=(),
     ) -> Completion:
         actor = current_actor.get() or self.workspace.actor(user, conversation_id, "web")
         actor_token = current_actor.set(actor)
         request_token = current_request.set(event_id or uuid4().hex)
         try:
-            return await self._reply(actor, conversation_id, text, event_id)
+            return await self._reply(
+                actor, conversation_id, text, event_id, reply_context, usage_reserved, images
+            )
         finally:
             current_actor.reset(actor_token)
             current_request.reset(request_token)
 
-    async def _reply(self, actor, conversation_id, text, event_id):
+    async def _reply(
+        self,
+        actor,
+        conversation_id,
+        text,
+        event_id,
+        reply_context=None,
+        usage_reserved=False,
+        images=(),
+    ):
         user = actor.user
-        stored_text = f"[{user.name}] {text}" if actor.channel == "group" else text
+        name_known = self.workspace.is_name_known(actor)
+        speaker_label = user.name if name_known else "Member"
+        stored_text = f"[{speaker_label}] {text}" if actor.channel == "group" else text
+        if images:
+            stored_text += "\n[Image attached for this turn; media is not retained in chat history]"
         if self.commands:
             result = await asyncio.to_thread(
                 self.commands.dispatch, actor, text, conversation_id, event_id or ""
@@ -51,18 +73,56 @@ class Assistant:
                 return completion
         if not self.provider.ready:
             raise ProviderUnavailable()
-        self.db.reserve_request(
-            user.id,
-            self.workspace.get("daily_team_requests", self.settings.daily_team_requests),
-            self.workspace.get("daily_user_requests", self.settings.daily_user_requests),
-        )
+        if not usage_reserved:
+            self.db.reserve_request(
+                user.id,
+                self.workspace.get("daily_team_requests", self.settings.daily_team_requests),
+                self.workspace.get("daily_user_requests", self.settings.daily_user_requests),
+            )
         self.db.cleanup(self.settings.context_days)
         history = self.db.history(
             conversation_id, self.settings.context_turns, self.settings.context_characters
         )
+
+        reference_block = ""
+        if reply_context:
+            author_display = getattr(reply_context, "resolved_author_name", "") or (
+                f"...{reply_context.author_identifier[-4:]}"
+                if getattr(reply_context, "author_identifier", "")
+                else "unknown sender"
+            )
+            if getattr(reply_context, "unavailable", False) or getattr(
+                reply_context, "media_error", ""
+            ):
+                error_msg = {
+                    "expired": "Quoted media is expired. Please ask the sender to resend it.",
+                    "download_failed": "Quoted attachment could not be downloaded.",
+                }.get(getattr(reply_context, "media_error", ""), "Quoted content is unavailable.")
+                reference_block = (
+                    f"[Quoted reference from {author_display} unavailable: {error_msg}]"
+                )
+            else:
+                import json
+
+                reference_block = "Quoted reference (untrusted data): " + json.dumps(
+                    {
+                        "author": author_display,
+                        "type": getattr(reply_context, "content_type", "text"),
+                        "text": getattr(reply_context, "text_or_caption", ""),
+                    },
+                    ensure_ascii=False,
+                )
+
+        full_user_text = f"{reference_block}\n\n{text}".strip() if reference_block else text
+        turn_text = (
+            f"[{speaker_label}] {full_user_text}" if actor.channel == "group" else full_user_text
+        )
+
         try:
             async with asyncio.timeout(self.settings.provider_timeout_seconds):
-                result = await self.provider.complete([*history, Message("user", text)])
+                result = await self.provider.complete(
+                    [*history, Message("user", turn_text, images)]
+                )
         except Exception as error:
             logger.warning("generation_failed type=%s", type(error).__name__)
             raise ProviderUnavailable() from None
